@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BeYkeRYkt <beykerykt@gmail.com>
+Date: Sun, 5 Sep 2021 02:09:04 +0700
+Subject: [PATCH] Starlight: Allow changing the lighting level from vanilla
+ space
+
+* At the moment, Starlight does not support lighting level changes called from
+  vanilla-space via onBlockEmissionIncrease(), which breaks the logic of some
+  bukkit plugins, for example LightAPI. Add an implementation of lighting
+  changes to handle such requests based on the code '***BlockChanges()'.
+* This commit contains only changes for blocks. A separate implementation is
+  required for the sky.
+
+Change-Id: Ic2df197064eb683ecc207e760125d0dbdd2e01fc
+Signed-off-by: BeYkeRYkt <beykerykt@gmail.com>
+
+diff --git a/src/main/java/ca/spottedleaf/starlight/light/BlockStarLightEngine.java b/src/main/java/ca/spottedleaf/starlight/light/BlockStarLightEngine.java
+index 9efbdba758aebcad3454a9a52c8a7eae4b7fc7eb..eb685b405184cefc787e0e2ef8e27f76e432cc4e 100644
+--- a/src/main/java/ca/spottedleaf/starlight/light/BlockStarLightEngine.java
++++ b/src/main/java/ca/spottedleaf/starlight/light/BlockStarLightEngine.java
+@@ -187,6 +187,31 @@ public final class BlockStarLightEngine extends StarLightEngine {
+         return level;
+     }
+ 
++    protected void checkLight(final LightChunkGetter lightAccess, final int worldX, final int worldY, final int worldZ, final int lightLevel) {
++        final int encodeOffset = this.coordinateOffset;
++        final int emittedMask = this.emittedLightMask;
++
++        final int currentLevel = this.getLightLevel(worldX, worldY, worldZ);
++        final BlockState blockState = this.getBlockState(worldX, worldY, worldZ);
++        final int emittedLevel = lightLevel & emittedMask;
++
++        this.setLightLevel(worldX, worldY, worldZ, emittedLevel);
++        if (emittedLevel != 0) {
++            this.appendToIncreaseQueue(
++                ((worldX + (worldZ << 6) + (worldY << (6 + 6)) + encodeOffset) & ((1L << (6 + 6 + 16)) - 1))
++                    | (emittedLevel & 0xFL) << (6 + 6 + 16)
++                    | (((long)ALL_DIRECTIONS_BITSET) << (6 + 6 + 16 + 4))
++                    | (blockState.isConditionallyFullOpaque() ? FLAG_HAS_SIDED_TRANSPARENT_BLOCKS : 0)
++            );
++        }
++
++        this.appendToDecreaseQueue(
++            ((worldX + (worldZ << 6) + (worldY << (6 + 6)) + encodeOffset) & ((1L << (6 + 6 + 16)) - 1))
++                | (currentLevel & 0xFL) << (6 + 6 + 16)
++                | (((long)ALL_DIRECTIONS_BITSET) << (6 + 6 + 16 + 4))
++        );
++    }
++
+     @Override
+     protected void propagateBlockChanges(final LightChunkGetter lightAccess, final ChunkAccess atChunk, final Set<BlockPos> positions) {
+         for (final BlockPos pos : positions) {
+@@ -196,6 +221,15 @@ public final class BlockStarLightEngine extends StarLightEngine {
+         this.performLightDecrease(lightAccess);
+     }
+ 
++    @Override
++    protected void propagateLightChanges(final LightChunkGetter lightAccess, final ChunkAccess atChunk, final Set<StarLightInterface.LightPos> lightPositions) {
++        for (final StarLightInterface.LightPos pos : lightPositions) {
++            this.checkLight(lightAccess, pos.blockPos.getX(), pos.blockPos.getY(), pos.blockPos.getZ(), pos.lightLevel);
++        }
++
++        this.performLightDecrease(lightAccess);
++    }
++
+     protected Iterator<BlockPos> getSources(final LightChunkGetter lightAccess, final ChunkAccess chunk) {
+         if (chunk instanceof ImposterProtoChunk || chunk instanceof LevelChunk) {
+             // implementation on Chunk is pretty awful, so write our own here. The big optimisation is
+diff --git a/src/main/java/ca/spottedleaf/starlight/light/SkyStarLightEngine.java b/src/main/java/ca/spottedleaf/starlight/light/SkyStarLightEngine.java
+index e843ceb27bce134f7785e8c45fac25d5ec747233..fce765c7c63ee2e3d44896113b71fae8b945aeef 100644
+--- a/src/main/java/ca/spottedleaf/starlight/light/SkyStarLightEngine.java
++++ b/src/main/java/ca/spottedleaf/starlight/light/SkyStarLightEngine.java
+@@ -449,6 +449,11 @@ public final class SkyStarLightEngine extends StarLightEngine {
+         this.performLightDecrease(lightAccess);
+     }
+ 
++    @Override
++    protected void propagateLightChanges(final LightChunkGetter lightAccess, final ChunkAccess atChunk, final Set<StarLightInterface.LightPos> lightPositions) {
++        // TODO: Implement this code
++    }
++
+     protected final int[] heightMapGen = new int[32 * 32];
+ 
+     @Override
+diff --git a/src/main/java/ca/spottedleaf/starlight/light/StarLightEngine.java b/src/main/java/ca/spottedleaf/starlight/light/StarLightEngine.java
+index 319e5c674f027e2e06322bb75b38acd46b51cc7a..7bae41b3d0530e123b31322b90083f0540e81219 100644
+--- a/src/main/java/ca/spottedleaf/starlight/light/StarLightEngine.java
++++ b/src/main/java/ca/spottedleaf/starlight/light/StarLightEngine.java
+@@ -416,7 +416,7 @@ public abstract class StarLightEngine {
+     protected abstract boolean canUseChunk(final ChunkAccess chunk);
+ 
+     public final void blocksChangedInChunk(final LightChunkGetter lightAccess, final int chunkX, final int chunkZ,
+-                                           final Set<BlockPos> positions, final Boolean[] changedSections) {
++                                           final Set<BlockPos> positions, final Set<StarLightInterface.LightPos> lightPositions, final Boolean[] changedSections) {
+         this.setupCaches(lightAccess, chunkX * 16 + 7, 128, chunkZ * 16 + 7, true, true);
+         try {
+             final ChunkAccess chunk = this.getChunkInCache(chunkX, chunkZ);
+@@ -432,6 +432,9 @@ public abstract class StarLightEngine {
+             if (!positions.isEmpty()) {
+                 this.propagateBlockChanges(lightAccess, chunk, positions);
+             }
++            if (!lightPositions.isEmpty()) {
++                this.propagateLightChanges(lightAccess, chunk, lightPositions);
++            }
+             this.updateVisible(lightAccess);
+         } finally {
+             this.destroyCaches();
+@@ -442,6 +445,8 @@ public abstract class StarLightEngine {
+     // subclasses should not invoke updateVisible, as this will always be done by the super call
+     protected abstract void propagateBlockChanges(final LightChunkGetter lightAccess, final ChunkAccess atChunk, final Set<BlockPos> positions);
+ 
++    protected abstract void propagateLightChanges(final LightChunkGetter lightAccess, final ChunkAccess atChunk, final Set<StarLightInterface.LightPos> lightPositions);
++
+     protected abstract void checkBlock(final LightChunkGetter lightAccess, final int worldX, final int worldY, final int worldZ);
+ 
+     // if ret > expect, then the real value is at least ret (early returns if ret > expect, rather than calculating actual)
+diff --git a/src/main/java/ca/spottedleaf/starlight/light/StarLightInterface.java b/src/main/java/ca/spottedleaf/starlight/light/StarLightInterface.java
+index 9b8412f50d161471166cdf5c9effc2d58915faa1..2ba58f2ac883e192a68448299f44f429e5c6cc17 100644
+--- a/src/main/java/ca/spottedleaf/starlight/light/StarLightInterface.java
++++ b/src/main/java/ca/spottedleaf/starlight/light/StarLightInterface.java
+@@ -202,7 +202,7 @@ public final class StarLightInterface {
+ 
+             @Override
+             public void onBlockEmissionIncrease(final BlockPos blockPos, final int i) {
+-                this.checkBlock(blockPos);
++                StarLightInterface.this.lightQueue.queueLightChange(blockPos.immutable(), i);
+             }
+ 
+             @Override
+@@ -213,7 +213,9 @@ public final class StarLightInterface {
+ 
+             @Override
+             public int runUpdates(final int i, final boolean bl, final boolean bl2) {
+-                throw new UnsupportedOperationException();
++                boolean hadUpdates = this.hasLightWork();
++                StarLightInterface.this.propagateChanges();
++                return hadUpdates ? 1 : 0;
+             }
+ 
+             @Override
+@@ -351,6 +353,14 @@ public final class StarLightInterface {
+         return this.lightQueue.queueBlockChange(pos);
+     }
+ 
++    public CompletableFuture<Void> lightChange(final BlockPos pos, int lightLevel) {
++        if (this.world == null || pos.getY() < WorldUtil.getMinBlockY(this.world) || pos.getY() > WorldUtil.getMaxBlockY(this.world)) { // empty world
++            return null;
++        }
++
++        return this.lightQueue.queueLightChange(pos, lightLevel);
++    }
++
+     public CompletableFuture<Void> sectionChange(final SectionPos pos, final boolean newEmptyValue) {
+         if (this.world == null) { // empty world
+             return null;
+@@ -510,13 +520,14 @@ public final class StarLightInterface {
+                 final int chunkZ = CoordinateUtils.getChunkZ(coordinate);
+ 
+                 final Set<BlockPos> positions = task.changedPositions;
++                final Set<LightPos> lightPositions = task.lightPositions;
+                 final Boolean[] sectionChanges = task.changedSectionSet;
+ 
+-                if (skyEngine != null && (!positions.isEmpty() || sectionChanges != null)) {
+-                    skyEngine.blocksChangedInChunk(this.lightAccess, chunkX, chunkZ, positions, sectionChanges);
++                if (skyEngine != null && (!positions.isEmpty() || !lightPositions.isEmpty() || sectionChanges != null)) {
++                    skyEngine.blocksChangedInChunk(this.lightAccess, chunkX, chunkZ, positions, lightPositions, sectionChanges);
+                 }
+-                if (blockEngine != null && (!positions.isEmpty() || sectionChanges != null)) {
+-                    blockEngine.blocksChangedInChunk(this.lightAccess, chunkX, chunkZ, positions, sectionChanges);
++                if (blockEngine != null && (!positions.isEmpty() || !lightPositions.isEmpty() || sectionChanges != null)) {
++                    blockEngine.blocksChangedInChunk(this.lightAccess, chunkX, chunkZ, positions, lightPositions, sectionChanges);
+                 }
+ 
+                 if (skyEngine != null && task.queuedEdgeChecksSky != null) {
+@@ -534,6 +545,16 @@ public final class StarLightInterface {
+         }
+     }
+ 
++    public static final class LightPos {
++        public BlockPos blockPos;
++        public int lightLevel;
++
++        public LightPos(BlockPos blockPos, int lightLevel) {
++            this.blockPos = blockPos;
++            this.lightLevel = lightLevel;
++        }
++    }
++
+     protected static final class LightQueue {
+ 
+         protected final Long2ObjectLinkedOpenHashMap<ChunkTasks> chunkTasks = new Long2ObjectLinkedOpenHashMap<>();
+@@ -547,6 +568,12 @@ public final class StarLightInterface {
+             return this.chunkTasks.isEmpty();
+         }
+ 
++        public synchronized CompletableFuture<Void> queueLightChange(final BlockPos pos, int lightLevel) {
++            final ChunkTasks tasks = this.chunkTasks.computeIfAbsent(CoordinateUtils.getChunkKey(pos), ChunkTasks::new);
++            tasks.lightPositions.add(new LightPos(pos.immutable(), lightLevel));
++            return tasks.onComplete;
++        }
++
+         public synchronized CompletableFuture<Void> queueBlockChange(final BlockPos pos) {
+             final ChunkTasks tasks = this.chunkTasks.computeIfAbsent(CoordinateUtils.getChunkKey(pos), ChunkTasks::new);
+             tasks.changedPositions.add(pos.immutable());
+@@ -618,6 +645,7 @@ public final class StarLightInterface {
+         protected static final class ChunkTasks {
+ 
+             public final Set<BlockPos> changedPositions = new HashSet<>();
++            public final Set<LightPos> lightPositions = new HashSet<>();
+             public Boolean[] changedSectionSet;
+             public ShortOpenHashSet queuedEdgeChecksSky;
+             public ShortOpenHashSet queuedEdgeChecksBlock;
